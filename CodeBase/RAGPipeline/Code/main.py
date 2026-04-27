@@ -40,7 +40,8 @@ from ingest import ChapterMeta, ingest
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+from pathlib import Path
+load_dotenv(dotenv_path=Path("C:/Users/naman/Desktop/Rootwise_LangGraph/.env"))
 
 hf_token = os.getenv("HF_TOKEN")
 groq_key = os.getenv("GROQ_API_KEY")
