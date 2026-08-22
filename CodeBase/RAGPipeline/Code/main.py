@@ -193,18 +193,70 @@ def _normalize_latex_delimiters(text: str) -> str:
     stronger than one instruction line — so normalize defensively rather than
     trusting compliance.
     """
-    if not text or "\\[" not in text and "\\(" not in text:
+    if not text:
         return text
-    text = _LATEX_BLOCK_RE.sub(lambda m: f"$${m.group(1).strip()}$$", text)
-    text = _LATEX_INLINE_RE.sub(lambda m: f"${m.group(1).strip()}$", text)
-    # Safety net: the model occasionally mixes delimiter styles within one
-    # equation (opens \[, closes $$) — the regexes above require a matching
-    # pair and skip those. Turn any leftover stray delimiter into its $
-    # equivalent so KaTeX still has a shot at rendering it, rather than
-    # leaving a raw backslash-bracket visible in the answer.
-    text = text.replace("\\[", "$$").replace("\\]", "$$")
-    text = text.replace("\\(", "$").replace("\\)", "$")
-    return text
+
+    if "\\[" in text or "\\(" in text:
+        text = _LATEX_BLOCK_RE.sub(lambda m: f"$${m.group(1).strip()}$$", text)
+        text = _LATEX_INLINE_RE.sub(lambda m: f"${m.group(1).strip()}$", text)
+        # Safety net: the model occasionally mixes delimiter styles within one
+        # equation (opens \[, closes $$) — the regexes above require a matching
+        # pair and skip those. Turn any leftover stray delimiter into its $
+        # equivalent so KaTeX still has a shot at rendering it, rather than
+        # leaving a raw backslash-bracket visible in the answer.
+        text = text.replace("\\[", "$$").replace("\\]", "$$")
+        text = text.replace("\\(", "$").replace("\\)", "$")
+
+    return _strip_unbalanced_math(text)
+
+
+_DOLLAR_TOKEN_RE = re.compile(r"\${1,2}")
+
+
+def _strip_unbalanced_math(text: str) -> str:
+    """
+    Final safety net. A naive odd/even count of '$' across the whole message
+    isn't enough — two separate imbalances earlier and later in the text can
+    numerically cancel out while still being structurally broken (e.g. one
+    genuinely-unclosed $$ plus one genuinely-extra $$ elsewhere sums to even).
+    When KaTeX hits an unclosed block, it doesn't just fail that one formula —
+    it swallows everything up to the *next* stray $ into one giant equation,
+    which can pull in whole paragraphs (markdown tables, bold text) and
+    render them as a wall of red error text.
+
+    So: scan left-to-right, treating $$ and $ as independently-toggling
+    open/close state (in the order they actually appear). Any token still
+    "open" when the string ends has no valid partner — strip just that one
+    token, leaving every correctly-paired block untouched.
+    """
+    tokens = [(m.start(), m.end(), m.group() == "$$") for m in _DOLLAR_TOKEN_RE.finditer(text)]
+    if not tokens:
+        return text
+
+    open_double = open_single = None
+    keep = [True] * len(tokens)
+    for idx, (_, _, is_double) in enumerate(tokens):
+        if is_double:
+            open_double = None if open_double is not None else idx
+        else:
+            open_single = None if open_single is not None else idx
+
+    if open_double is not None:
+        keep[open_double] = False
+    if open_single is not None:
+        keep[open_single] = False
+
+    if all(keep):
+        return text
+
+    out, last = [], 0
+    for (start, end, _), k in zip(tokens, keep):
+        out.append(text[last:start])
+        if k:
+            out.append(text[start:end])
+        last = end
+    out.append(text[last:])
+    return "".join(out)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
