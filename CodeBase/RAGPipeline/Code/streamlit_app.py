@@ -84,7 +84,12 @@ def _sources_from(result) -> list[dict]:
     return result.get("rag_docs_meta") or []
 
 
-def _run(query: str, confirmed=None):
+def _history_for_context() -> list[dict]:
+    """Prior turns as plain {"role", "content"} dicts for main.py's chat_history param."""
+    return [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+
+
+def _run(query: str, confirmed=None, history=None):
     with st.spinner("Thinking..."):
         return pipeline.run_query(
             query=query,
@@ -92,6 +97,7 @@ def _run(query: str, confirmed=None):
             grade=grade,
             thread_id=st.session_state.thread_id,
             user_confirmed_oob=confirmed,
+            chat_history=history if history is not None else _history_for_context(),
         )
 
 
@@ -107,7 +113,9 @@ def _is_pending_confirmation(result) -> bool:
 if st.session_state.pending_query:
     col1, col2 = st.columns(2)
     if col1.button("✅ Yes, solve it anyway"):
-        result = _run(st.session_state.pending_query, confirmed=True)
+        history = _history_for_context()  # snapshot BEFORE appending this click
+        st.session_state.messages.append({"role": "user", "content": "Yes, solve it anyway.", "meta": None})
+        result = _run(st.session_state.pending_query, confirmed=True, history=history)
         st.session_state.messages.append({
             "role": "assistant",
             "content": result.get("response", ""),
@@ -117,7 +125,9 @@ if st.session_state.pending_query:
         st.session_state.pending_query = None
         st.rerun()
     if col2.button("❌ No, skip it"):
-        result = _run(st.session_state.pending_query, confirmed=False)
+        history = _history_for_context()
+        st.session_state.messages.append({"role": "user", "content": "No, skip it.", "meta": None})
+        result = _run(st.session_state.pending_query, confirmed=False, history=history)
         st.session_state.messages.append({
             "role": "assistant",
             "content": result.get("response", ""),
@@ -129,11 +139,12 @@ if st.session_state.pending_query:
 
 # ── Chat input ───────────────────────────────────────────────────────────────
 if query := st.chat_input("Ask a question from Motion, Force and Laws of Motion, or Gravitation..."):
+    history = _history_for_context()  # snapshot BEFORE appending this query
     st.session_state.messages.append({"role": "user", "content": query, "meta": None})
     with st.chat_message("user"):
         st.markdown(query)
 
-    result = _run(query)
+    result = _run(query, history=history)
 
     with st.chat_message("assistant"):
         st.markdown(result.get("response", ""))

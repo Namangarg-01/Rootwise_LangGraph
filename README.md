@@ -44,16 +44,18 @@ flowchart TD
 
 **2. Classify & retrieve** — the query is classified into `concept`, `numerical`, or `question_gen`, and the hierarchical retriever pulls the most relevant textbook sections.
 
-**3. Personalize context** — every path (concept, numerical, question generation) is enriched with the student's profile (weak topics, learning style, past errors, interests) before it reaches a solver. This context is used to flavour explanations and practice questions, and to append a closing study note.
+**3. Personalize context** — every path (concept, numerical, question generation) is enriched with the student's profile (weak topics, learning style, past errors, interests) *and* the recent conversation history before it reaches a solver. This context is used to flavour explanations and practice questions, resolve follow-ups, and append a closing study note.
 
 **4. Type-specific solving:**
 - `concept_understander` — explains a concept using *only* the retrieved textbook context.
 - `book_numerical_solver` — solves numericals using *only* formulas explicitly present in the retrieved context. If no matching formula exists, it returns `OUT_OF_BOOK_SCOPE` instead of guessing.
 - `question_generator` — generates a configurable number of practice questions (parsed from the query, e.g. "give me 5 questions"), pulled from real book numericals and flavoured with the student's interests, with an auto-scaled easy/medium/hard difficulty split.
 
-**5. Out-of-book confirmation loop** — if a numerical falls outside the book's scope, the agent asks the student whether to solve it anyway using general knowledge. The graph pauses at this node (checkpointed via `MemorySaver`) until the student's yes/no answer is passed back in on the next invocation — then routes to `general_numerical_solver` (with an explicit "beyond your textbook" disclaimer) or `polite_refusal`.
+**5. Out-of-book confirmation loop** — if a numerical falls outside the book's scope, the agent asks the student whether to solve it anyway using general knowledge. The caller (e.g. the Streamlit app) stores the pending query and re-invokes `run_query` with `user_confirmed_oob=True/False` once the student answers — the graph re-runs end-to-end and routes to `general_numerical_solver` (with an explicit "beyond your textbook" disclaimer) or `polite_refusal`.
 
 **6. Personalised note** — every successful answer ends with a short "Personalised Note" — one sentence flagging overlap with a weak area, one study tip matched to the student's learning style, and a warning about a relevant past error pattern.
+
+**7. Conversation memory** — `run_query` accepts a `chat_history` list (prior turns) that flows into the guardrail, intent classifier, retrieval query, and every solver — so "give me an example of that" or "solve another one like the last" resolve correctly instead of being treated as standalone, context-free queries. The caller owns persisting this list (`streamlit_app.py` does it via `st.session_state.messages`); `run_query` itself is stateless per call and never mutates or reads state from the `MemorySaver` checkpointer across calls — each invocation re-runs the full graph from `input_guardrail`, using whatever `chat_history` and `user_confirmed_oob` you pass in.
 
 ## RAG: parent-child hierarchical retrieval
 

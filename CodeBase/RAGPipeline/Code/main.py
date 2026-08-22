@@ -60,6 +60,7 @@ class AgentState(TypedDict):
     query:              str
     user_id:            str
     grade:              str
+    chat_history:       Optional[list[dict]]  # prior turns: [{"role": "user"/"assistant", "content": str}, ...]
 
     # Classification & routing
     query_type:         Literal["concept", "numerical", "question_gen", "off_topic"]
@@ -120,22 +121,49 @@ def get_personalized_data(user_id: str) -> dict:
 # 3.  GUARDRAIL HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _format_history(history: Optional[list[dict]], max_turns: int = 4) -> str:
+    """
+    Formats the last `max_turns` exchanges as a short transcript block, used to
+    give the LLM conversational context (so "give an example of that" resolves
+    correctly instead of being treated as a standalone, context-free query).
+    """
+    if not history:
+        return ""
+    recent = history[-max_turns * 2:]  # each turn = 1 student msg + 1 tutor reply
+    lines = []
+    for turn in recent:
+        role = "Student" if turn.get("role") == "user" else "Rootwise"
+        content = str(turn.get("content", "")).strip()
+        if content:
+            lines.append(f"{role}: {content}")
+    if not lines:
+        return ""
+    return (
+        "\n\n[Recent conversation — for context only, do not repeat or re-answer it]\n"
+        + "\n".join(lines)
+        + "\n[End recent conversation]\n"
+    )
+
+
 # Topics that are always off-limits regardless of framing
 _OFF_TOPIC_SIGNAL = """You are an academic content guardrail for a school-level AI tutor.
 
-Determine if the query is a legitimate academic school-level question (science, maths, 
+Determine if the query is a legitimate academic school-level question (science, maths,
 social science, language, history, geography, general knowledge related to school curriculum).
+Use the recent conversation (if any) to resolve follow-ups like "give an example of that"
+or "what about the second one" — judge the query in context, not in isolation.
 
 Reply with ONLY one word:
 - "academic"   → question is about school curriculum subjects
-- "off_topic"  → question is unrelated to academics (entertainment, personal advice, 
+- "off_topic"  → question is unrelated to academics (entertainment, personal advice,
                   politics, harmful content, coding projects, adult topics, etc.)
-
+{history}
 Query: "{query}"
 """
 
-def _is_academic(query: str) -> bool:
-    result = llm.invoke([HumanMessage(content=_OFF_TOPIC_SIGNAL.format(query=query))])
+def _is_academic(query: str, history: Optional[list[dict]] = None) -> bool:
+    prompt = _OFF_TOPIC_SIGNAL.format(query=query, history=_format_history(history, max_turns=2))
+    result = llm.invoke([HumanMessage(content=prompt)])
     verdict = result.content.strip().lower()
     return "academic" in verdict
 
@@ -151,7 +179,7 @@ def input_guardrail(state: AgentState) -> AgentState:
     Gate 1: reject non-academic queries before any RAG or solver work.
     Sets guardrail_blocked = True if the query is off-topic.
     """
-    if not _is_academic(state["query"]):
+    if not _is_academic(state["query"], state.get("chat_history")):
         return {
             **state,
             "guardrail_blocked": True,
@@ -174,12 +202,17 @@ def classify_and_retrieve(state: AgentState) -> AgentState:
     2. Retrieve relevant book context via HierarchicalRetriever
     3. Determine if the book actually covers this query (in_scope check)
     """
+    history_block = _format_history(state.get("chat_history"), max_turns=3)
+
     # ── classify intent ──
     classify_prompt = f"""Classify this academic query into ONE of three types:
 - "concept"       : student wants a concept explained (definition, how/why something works)
 - "numerical"     : student wants a calculation / problem solved
 - "question_gen"  : student is asking you to generate practice questions on a topic
 
+Use the recent conversation (if any) to classify follow-ups correctly — e.g. "solve another
+one like that" after a numerical answer is still "numerical", not "concept".
+{history_block}
 Query: "{state['query']}"
 Respond with ONLY one word (concept / numerical / question_gen)."""
 
@@ -188,9 +221,17 @@ Respond with ONLY one word (concept / numerical / question_gen)."""
     query_type = raw if raw in ("concept", "numerical", "question_gen") else "concept"
 
     # ── RAG retrieval ──
+    # Augment the search string with the last student turn so follow-ups like
+    # "give me an example of that" retrieve the right chapter section instead
+    # of matching on nothing (the pronoun alone carries no topical signal).
+    search_query = state["query"]
+    prior_user_turns = [h["content"] for h in (state.get("chat_history") or []) if h.get("role") == "user"]
+    if prior_user_turns:
+        search_query = f"{prior_user_turns[-1]} {state['query']}"
+
     retriever    = get_retriever()
-    context_docs, leaf_docs = retriever.retrieve(state["query"])
-    scored_leaves           = retriever.retrieve_with_scores(state["query"])
+    context_docs, leaf_docs = retriever.retrieve(search_query)
+    scored_leaves           = retriever.retrieve_with_scores(search_query)
     sufficient              = is_context_sufficient(context_docs, scored_leaves)
 
     rag_context   = build_context(context_docs)
@@ -234,7 +275,9 @@ def personalize_context(state: AgentState) -> AgentState:
         f"[END HINT]"
     )
 
-    enriched_context = (state.get("rag_context") or "") + interest_hint
+    history_block = _format_history(state.get("chat_history"), max_turns=4)
+
+    enriched_context = (state.get("rag_context") or "") + interest_hint + history_block
 
     return {
         **state,
@@ -260,6 +303,10 @@ STRICT RULES:
 4. NEVER mention section numbers or section names from the book (e.g. do NOT write
    "8.1", "Section 8.2", "8.3 Inertia and Mass", or any similar reference). Explain
    concepts in your own words without citing internal book structure.
+5. If a [Recent conversation] block appears below, use it ONLY to understand what the
+   student is referring to (e.g. resolve "that", "the second one", "give another example").
+   Every fact and formula in your answer must still come from <context> — never from
+   the conversation history itself.
 ...
 <context>
 {state.get('rag_context', 'No context retrieved.') if has_context else 'No context retrieved.'}
@@ -300,6 +347,8 @@ STRICT RULES — READ CAREFULLY:
 6. NEVER mention section numbers or section names from the book (e.g. do NOT write
    "8.1", "Section 8.4", "8.1 A constant force", or anything similar). Just explain
    and solve without citing internal book structure.
+7. If a [Recent conversation] block appears below, use it ONLY to understand what the
+   student is referring to — every formula and value must still come from <context>.
 
 <context>
 {state.get('rag_context', 'No context retrieved.')}
@@ -364,6 +413,8 @@ def general_numerical_solver(state: AgentState) -> AgentState:
     Solves out-of-book numericals with general knowledge.
     Includes a clear disclaimer that this is beyond the textbook.
     """
+    history_block = _format_history(state.get("chat_history"), max_turns=4)
+
     system = f"""You are Rootwise, a {state.get('grade', '9th')}-grade science/maths tutor.
 
 The student confirmed they want a solution even though this isn't in their current book.
@@ -374,7 +425,10 @@ RULES:
 3. Mention which standard formula/principle you're using.
 4. Keep the explanation at {state.get('grade', '9th')}-grade level.
 5. Do NOT discuss anything outside school maths/science.
-6. Do NOT mention section numbers or section names from the book."""
+6. Do NOT mention section numbers or section names from the book.
+7. If a [Recent conversation] block appears below, use it only to understand what the
+   student is referring to.
+{history_block}"""
 
     result = llm.invoke([
         SystemMessage(content=system),
@@ -450,6 +504,9 @@ STRICT RULES:
 5. For each question: state it clearly, then provide the full worked solution below it.
 6. Do NOT cite section numbers or section names (e.g. do NOT write "8.1", "Section 8.3").
 7. Do NOT generate questions about topics outside school academics.
+8. If a [Recent conversation] block appears below, use it only to understand what topic
+   the student means (e.g. "more like the last one") — questions must still be built
+   only from <context>.
 
 
 <context>
@@ -661,9 +718,17 @@ def run_query(
     grade:            str  = "9th",
     thread_id:        str  = "default",
     user_confirmed_oob: Optional[bool] = None,
+    chat_history:     Optional[list[dict]] = None,
 ) -> dict:
     """
     Main entry point.
+
+    chat_history: prior turns as [{"role": "user"/"assistant", "content": str}, ...],
+    oldest first. Every node in the pipeline (guardrail, classifier, retriever, and
+    all four answer-generating solvers) reads this for conversational context, so
+    follow-ups like "give me an example of that" resolve correctly. The caller owns
+    persisting this list — run_query does not mutate or auto-extend it; append the
+    new (query, response) pair yourself after each call.
 
     For out-of-book numerical confirmation flow:
       - First call: run_query("A 5kg object...") → returns confirmation question
@@ -674,6 +739,7 @@ def run_query(
         "query":              query,
         "user_id":            user_id,
         "grade":              grade,
+        "chat_history":       chat_history or [],
         "query_type":         "concept",
         "is_in_book_scope":   True,
         "user_confirmed_oob": user_confirmed_oob,
