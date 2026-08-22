@@ -38,10 +38,15 @@ from context_builder import build_context, build_prompt, is_context_sufficient
 from ingest import ChapterMeta, ingest
 
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
 from pathlib import Path
-load_dotenv(dotenv_path=Path("C:/Users/naman/Desktop/Rootwise_LangGraph/.env"))
+
+# Search near this file first (robust to being imported from any working
+# directory, e.g. by Streamlit), then fall back to searching from the
+# process's current working directory.
+_dotenv_path = find_dotenv(filename=".env", usecwd=False) or find_dotenv(usecwd=True)
+load_dotenv(_dotenv_path)
 
 hf_token = os.getenv("HF_TOKEN")
 groq_key = os.getenv("GROQ_API_KEY")
@@ -79,7 +84,7 @@ class AgentState(TypedDict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 llm = ChatGroq(
-    model="llama-3.1-8b-instant",
+    model="openai/gpt-oss-120b",
     groq_api_key= groq_key,
 )
 

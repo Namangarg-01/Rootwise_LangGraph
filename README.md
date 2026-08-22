@@ -71,29 +71,45 @@ An `is_context_sufficient` scope check (minimum doc count + average relevance sc
 
 ## Tech stack
 
-Python, LangGraph, LangChain, Groq (`llama-3.1-8b-instant`), ChromaDB, HuggingFace sentence-transformers (`all-mpnet-base-v2`), PyMuPDF.
+Python, LangGraph, LangChain, Groq (`openai/gpt-oss-120b`), ChromaDB, HuggingFace sentence-transformers (`all-mpnet-base-v2`), PyMuPDF, Streamlit.
 
-## Setup
+## Try it live
+
+A chat UI is included and ready to demo — [`streamlit_app.py`](CodeBase/RAGPipeline/Code/streamlit_app.py). The vector store for all three chapters (Motion, Force and Laws of Motion, Gravitation) is pre-built and committed (`chroma_db/`), so there's no ingestion step needed to try it.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Create a `.env` file with:
+Create a `.env` file in the repo root with:
 
 ```
 GROQ_API_KEY=your_groq_api_key
 HF_TOKEN=your_huggingface_token
 ```
 
-Ingest a textbook PDF once to build the vector store:
+Run the chat app:
 
-```python
-from main import ingest_book
-ingest_book("path/to/chapter.pdf")
+```bash
+cd CodeBase/RAGPipeline/Code
+streamlit run streamlit_app.py
 ```
 
-Then query the agent:
+**Deploying on Streamlit Community Cloud:** point the app at `CodeBase/RAGPipeline/Code/streamlit_app.py`, and add `GROQ_API_KEY` / `HF_TOKEN` under the app's Secrets — no `.env` file needed there, the app reads secrets directly.
+
+## Programmatic usage
+
+To ingest a new textbook chapter (only needed if you add a chapter beyond the three already included):
+
+```python
+from ingest import ChapterMeta, ingest
+ingest(pdf_path="path/to/chapter.pdf", chapter_meta=ChapterMeta(
+    book_name="Science - Class IX", chapter="Chapter 10",
+    chapter_title="Work and Energy", topic="Energy", start_page=1, end_page=999,
+))
+```
+
+Then query the agent directly:
 
 ```python
 from main import run_query
@@ -109,9 +125,14 @@ result = run_query("A 5 kg object accelerates at 3 m/s². What is the force?",
 ## Project structure
 
 ```
-CodeBase/RAGPipeline/Code/
-├── main.py             # AgentState, all graph nodes, routing, graph assembly
-├── retriever.py         # HierarchicalRetriever — parent-child retrieval + MMR
-├── ingest.py             # PDF → chapter/section/chunk hierarchy → vector store
-└── context_builder.py    # Formats retrieved docs into cited, token-budgeted context
+CodeBase/RAGPipeline/
+├── Files/                  # Source textbook PDFs
+└── Code/
+    ├── main.py             # AgentState, all graph nodes, routing, graph assembly
+    ├── retriever.py         # HierarchicalRetriever — parent-child retrieval + MMR
+    ├── ingest.py             # PDF → chapter/section/chunk hierarchy → vector store
+    ├── context_builder.py    # Formats retrieved docs into cited, token-budgeted context
+    ├── streamlit_app.py       # Chat UI — self-contained, deployable standalone
+    ├── chroma_db/              # Pre-built vector store (all 3 chapters, ~2.4 MB)
+    └── parent_store.json       # Pre-built parent-section store for context expansion
 ```
