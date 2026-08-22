@@ -91,14 +91,26 @@ def _history_for_context() -> list[dict]:
 
 def _run(query: str, confirmed=None, history=None):
     with st.spinner("Thinking..."):
-        return pipeline.run_query(
-            query=query,
-            user_id=user_id,
-            grade=grade,
-            thread_id=st.session_state.thread_id,
-            user_confirmed_oob=confirmed,
-            chat_history=history if history is not None else _history_for_context(),
-        )
+        try:
+            return pipeline.run_query(
+                query=query,
+                user_id=user_id,
+                grade=grade,
+                thread_id=st.session_state.thread_id,
+                user_confirmed_oob=confirmed,
+                chat_history=history if history is not None else _history_for_context(),
+            )
+        except Exception:
+            # run_query() already degrades gracefully for known failure modes
+            # (LLM down, retriever error). This is a last-resort safety net —
+            # a Streamlit crash mid-conversation loses the whole chat history.
+            return {
+                "query_type": "concept",
+                "is_in_book_scope": False,
+                "user_confirmed_oob": confirmed,
+                "response": "Something went wrong on my end. Please try asking again.",
+                "rag_docs_meta": [],
+            }
 
 
 def _is_pending_confirmation(result) -> bool:

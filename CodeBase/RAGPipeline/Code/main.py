@@ -25,6 +25,7 @@ Guardrails:
 """
 
 import os
+import logging
 from typing import TypedDict, Literal, Optional
 
 import time
@@ -47,6 +48,9 @@ from pathlib import Path
 # process's current working directory.
 _dotenv_path = find_dotenv(filename=".env", usecwd=False) or find_dotenv(usecwd=True)
 load_dotenv(_dotenv_path)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger("rootwise")
 
 hf_token = os.getenv("HF_TOKEN")
 groq_key = os.getenv("GROQ_API_KEY")
@@ -102,6 +106,53 @@ def get_retriever() -> HierarchicalRetriever:
             expand_to_parent = True,
         )
     return _retriever
+
+
+class LLMUnavailableError(RuntimeError):
+    """Raised when the LLM can't be reached after retries, or the query is invalid."""
+
+
+def _safe_invoke(messages, max_retries: int = 3):
+    """
+    Wraps llm.invoke() with retry on transient Groq errors (rate limit,
+    connection issues, 5xx). Raises LLMUnavailableError after exhausting
+    retries — run_query() catches this and returns a graceful apology
+    instead of letting an unhandled exception crash the whole graph.
+    """
+    from groq import APIConnectionError, APIStatusError, RateLimitError
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = llm.invoke(messages)
+            if not result.content or not str(result.content).strip():
+                # Groq occasionally returns an empty completion (e.g. safety
+                # filter trips with no message) — treat it as retryable rather
+                # than silently showing the student a blank answer.
+                raise ValueError("Empty LLM response")
+            return result
+        except ValueError as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                time.sleep(1.0)
+        except RateLimitError as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)
+        except APIConnectionError as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                time.sleep(1.5 ** attempt)
+        except APIStatusError as exc:
+            # 5xx are worth retrying; 4xx (bad model, bad key, etc.) are not.
+            last_exc = exc
+            if exc.status_code < 500 or attempt == max_retries:
+                raise LLMUnavailableError(f"Groq API error {exc.status_code}: {exc.message}") from exc
+            time.sleep(1.5 ** attempt)
+        except Exception as exc:
+            # Unexpected error type — fail fast rather than retrying blindly.
+            raise LLMUnavailableError(f"LLM call failed: {exc}") from exc
+    raise LLMUnavailableError(f"LLM unavailable after {max_retries} attempts: {last_exc}")
 
 
 def get_personalized_data(user_id: str) -> dict:
@@ -163,7 +214,7 @@ Query: "{query}"
 
 def _is_academic(query: str, history: Optional[list[dict]] = None) -> bool:
     prompt = _OFF_TOPIC_SIGNAL.format(query=query, history=_format_history(history, max_turns=2))
-    result = llm.invoke([HumanMessage(content=prompt)])
+    result = _safe_invoke([HumanMessage(content=prompt)])
     verdict = result.content.strip().lower()
     return "academic" in verdict
 
@@ -216,7 +267,7 @@ one like that" after a numerical answer is still "numerical", not "concept".
 Query: "{state['query']}"
 Respond with ONLY one word (concept / numerical / question_gen)."""
 
-    classification = llm.invoke([HumanMessage(content=classify_prompt)])
+    classification = _safe_invoke([HumanMessage(content=classify_prompt)])
     raw = classification.content.strip().lower()
     query_type = raw if raw in ("concept", "numerical", "question_gen") else "concept"
 
@@ -312,7 +363,7 @@ STRICT RULES:
 {state.get('rag_context', 'No context retrieved.') if has_context else 'No context retrieved.'}
 </context>"""
 
-    result = llm.invoke([
+    result = _safe_invoke([
         SystemMessage(content=system),
         HumanMessage(content=state["query"]),
     ])
@@ -354,7 +405,7 @@ STRICT RULES — READ CAREFULLY:
 {state.get('rag_context', 'No context retrieved.')}
 </context>"""
 
-    result = llm.invoke([
+    result = _safe_invoke([
         SystemMessage(content=system),
         HumanMessage(content=state["query"]),
     ])
@@ -430,7 +481,7 @@ RULES:
    student is referring to.
 {history_block}"""
 
-    result = llm.invoke([
+    result = _safe_invoke([
         SystemMessage(content=system),
         HumanMessage(content=state["query"]),
     ])
@@ -513,7 +564,7 @@ STRICT RULES:
 {state.get('rag_context', 'No context retrieved.')}
 </context>"""
 
-    result = llm.invoke([
+    result = _safe_invoke([
         SystemMessage(content=system),
         HumanMessage(content=state["query"]),
     ])
@@ -567,20 +618,19 @@ Student profile:
 
 Write ONLY the 📌 Personalised Note (no preamble, no repetition of the answer):"""
 
-    for attempt in range(3):
-        try:
-            result = llm.invoke([
-                SystemMessage(content=system),
-                HumanMessage(content=user_msg),
-            ])
-            note = result.content.strip()
-            # Guarantee the separator is clean — never glue onto answer mid-sentence
-            return raw_answer.rstrip() + "\n\n" + note
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(3 * (attempt + 1))
-            else:
-                return raw_answer + "\n\n📌 Personalised Note: (unavailable — rate limit reached)"
+    # _safe_invoke already retries transient failures internally — a note is a
+    # nice-to-have, so on final failure we degrade to the plain answer rather
+    # than losing the (already-generated) main response.
+    try:
+        result = _safe_invoke([
+            SystemMessage(content=system),
+            HumanMessage(content=user_msg),
+        ])
+        note = result.content.strip()
+        # Guarantee the separator is clean — never glue onto answer mid-sentence
+        return raw_answer.rstrip() + "\n\n" + note
+    except LLMUnavailableError:
+        return raw_answer + "\n\n📌 Personalised Note: (unavailable right now — please try again shortly)"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -750,8 +800,45 @@ def run_query(
         "response":           "",
         "guardrail_blocked":  False,
     }
+
+    if not query or not query.strip():
+        return {
+            **initial,
+            "query_type":        "off_topic",
+            "guardrail_blocked": True,
+            "response":          "I didn't catch a question there — try asking me something from your chapters!",
+        }
+
     config = {"configurable": {"thread_id": thread_id}}
-    return app.invoke(initial, config=config)
+    try:
+        return app.invoke(initial, config=config)
+    except LLMUnavailableError as exc:
+        logger.error("LLM unavailable — degrading gracefully: %s", exc)
+        return {
+            **initial,
+            "query_type":        "concept",
+            "is_in_book_scope":  False,
+            "guardrail_blocked": False,
+            "response": (
+                "I'm having trouble reaching the AI service right now "
+                "(it may be rate-limited or briefly down). Please try again in a moment."
+            ),
+        }
+    except Exception as exc:
+        # Safety net for anything else that can go wrong mid-graph — a broken
+        # embeddings download, a corrupted vector store, etc. A crashed
+        # Streamlit process is a much worse experience than an apology message.
+        logger.exception("Unexpected error during run_query")
+        return {
+            **initial,
+            "query_type":        "concept",
+            "is_in_book_scope":  False,
+            "guardrail_blocked": False,
+            "response": (
+                "Something went wrong while processing that question. "
+                "Please try again — if it keeps happening, try a simpler question or refresh."
+            ),
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

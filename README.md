@@ -71,6 +71,14 @@ Only Level-2 leaf chunks are embedded and searched (Chroma + `all-mpnet-base-v2`
 
 An `is_context_sufficient` scope check (minimum doc count + average relevance score) decides whether the book actually covers the query, driving the out-of-book confirmation flow above.
 
+## Robustness
+
+- **LLM calls retry on transient failures** — rate limits and connection errors get exponential-backoff retries (3 attempts); non-retryable errors (bad model, bad key) fail fast with a clear message instead of hanging.
+- **Empty LLM completions are treated as failures and retried**, not silently shown to the student as a blank answer.
+- **`run_query()` never raises to the caller** — any failure (LLM down, retriever/embeddings error, anything unexpected) degrades to an apologetic response instead of crashing the graph invocation or the Streamlit process.
+- **Empty/whitespace-only queries are rejected before hitting the LLM.**
+- The Streamlit UI has its own last-resort exception handler around every `run_query()` call, so a bug in the pipeline can't wipe out an in-progress conversation.
+
 ## Tech stack
 
 Python, LangGraph, LangChain, Groq (`openai/gpt-oss-120b`), ChromaDB, HuggingFace sentence-transformers (`all-mpnet-base-v2`), PyMuPDF, Streamlit.
