@@ -78,6 +78,7 @@ An `is_context_sufficient` scope check (minimum doc count + average relevance sc
 - **`run_query()` never raises to the caller** — any failure (LLM down, retriever/embeddings error, anything unexpected) degrades to an apologetic response instead of crashing the graph invocation or the Streamlit process.
 - **Empty/whitespace-only queries are rejected before hitting the LLM.**
 - The Streamlit UI has its own last-resort exception handler around every `run_query()` call, so a bug in the pipeline can't wipe out an in-progress conversation.
+- **Math renders as actual LaTeX, not raw text.** Despite an explicit prompt instruction, models reliably default to `\( \)` / `\[ \]` (their strongest LaTeX training prior) instead of the `$...$` / `$$...$$` Streamlit's KaTeX renderer requires — every response is normalized before display, including a safety net for the rare case where a model mixes delimiter styles within one equation.
 
 ## Tech stack
 

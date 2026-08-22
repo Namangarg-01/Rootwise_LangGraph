@@ -25,6 +25,7 @@ Guardrails:
 """
 
 import os
+import re
 import logging
 from typing import TypedDict, Literal, Optional
 
@@ -166,6 +167,44 @@ def get_personalized_data(user_id: str) -> dict:
         "interests":        ["swimming", "cycling"],   # used for personalised question flavour
         "preferred_examples": ["sports", "everyday objects"],
     }
+
+
+# Streamlit's markdown renderer supports KaTeX via $...$ / $$...$$ delimiters
+# only — NOT \[ \] or bare [ ]. Every solver includes this so formulas render
+# as actual math instead of showing up as raw "[ \frac{F}{m} ]" text.
+_MATH_FORMAT_RULE = (
+    "Formatting: write ALL mathematical expressions in LaTeX using $...$ for inline math "
+    "and $$...$$ for standalone/display equations. Never use \\[ \\], \\( \\), or plain "
+    "square brackets around a formula. Every equation must open AND close with the SAME "
+    "delimiter — never mix, e.g. never open with \\[ and close with $$. "
+    "Correct: $a = \\frac{F}{m}$ or $$a = \\frac{F}{m}$$. "
+    "Wrong: [ a = \\frac{F}{m} ], \\[ a = \\frac{F}{m} \\], or \\[ a = \\frac{F}{m} $$."
+)
+
+_LATEX_BLOCK_RE = re.compile(r"\\\[(.*?)\\\]", re.DOTALL)
+_LATEX_INLINE_RE = re.compile(r"\\\((.*?)\\\)", re.DOTALL)
+
+
+def _normalize_latex_delimiters(text: str) -> str:
+    """
+    Streamlit's markdown renderer only recognizes $...$ / $$...$$ for LaTeX
+    (KaTeX), not \\( \\) / \\[ \\]. Despite _MATH_FORMAT_RULE, models reliably
+    fall back to \\( \\) / \\[ \\] anyway — their LaTeX training prior is
+    stronger than one instruction line — so normalize defensively rather than
+    trusting compliance.
+    """
+    if not text or "\\[" not in text and "\\(" not in text:
+        return text
+    text = _LATEX_BLOCK_RE.sub(lambda m: f"$${m.group(1).strip()}$$", text)
+    text = _LATEX_INLINE_RE.sub(lambda m: f"${m.group(1).strip()}$", text)
+    # Safety net: the model occasionally mixes delimiter styles within one
+    # equation (opens \[, closes $$) — the regexes above require a matching
+    # pair and skip those. Turn any leftover stray delimiter into its $
+    # equivalent so KaTeX still has a shot at rendering it, rather than
+    # leaving a raw backslash-bracket visible in the answer.
+    text = text.replace("\\[", "$$").replace("\\]", "$$")
+    text = text.replace("\\(", "$").replace("\\)", "$")
+    return text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -358,7 +397,8 @@ STRICT RULES:
    student is referring to (e.g. resolve "that", "the second one", "give another example").
    Every fact and formula in your answer must still come from <context> — never from
    the conversation history itself.
-...
+6. {_MATH_FORMAT_RULE}
+
 <context>
 {state.get('rag_context', 'No context retrieved.') if has_context else 'No context retrieved.'}
 </context>"""
@@ -400,6 +440,7 @@ STRICT RULES — READ CAREFULLY:
    and solve without citing internal book structure.
 7. If a [Recent conversation] block appears below, use it ONLY to understand what the
    student is referring to — every formula and value must still come from <context>.
+8. {_MATH_FORMAT_RULE} Box the final answer using \\boxed{{...}} inside $$...$$.
 
 <context>
 {state.get('rag_context', 'No context retrieved.')}
@@ -479,6 +520,7 @@ RULES:
 6. Do NOT mention section numbers or section names from the book.
 7. If a [Recent conversation] block appears below, use it only to understand what the
    student is referring to.
+8. {_MATH_FORMAT_RULE}
 {history_block}"""
 
     result = _safe_invoke([
@@ -558,6 +600,7 @@ STRICT RULES:
 8. If a [Recent conversation] block appears below, use it only to understand what topic
    the student means (e.g. "more like the last one") — questions must still be built
    only from <context>.
+9. {_MATH_FORMAT_RULE}
 
 
 <context>
@@ -811,7 +854,10 @@ def run_query(
 
     config = {"configurable": {"thread_id": thread_id}}
     try:
-        return app.invoke(initial, config=config)
+        result = app.invoke(initial, config=config)
+        if result.get("response"):
+            result["response"] = _normalize_latex_delimiters(result["response"])
+        return result
     except LLMUnavailableError as exc:
         logger.error("LLM unavailable — degrading gracefully: %s", exc)
         return {
