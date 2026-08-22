@@ -178,11 +178,53 @@ _MATH_FORMAT_RULE = (
     "square brackets around a formula. Every equation must open AND close with the SAME "
     "delimiter — never mix, e.g. never open with \\[ and close with $$. "
     "Correct: $a = \\frac{F}{m}$ or $$a = \\frac{F}{m}$$. "
-    "Wrong: [ a = \\frac{F}{m} ], \\[ a = \\frac{F}{m} \\], or \\[ a = \\frac{F}{m} $$."
+    "Wrong: [ a = \\frac{F}{m} ], \\[ a = \\frac{F}{m} \\], or \\[ a = \\frac{F}{m} $$. "
+    "For a multi-step derivation, do NOT use \\begin{aligned}, &, or \\\\ line breaks — "
+    "those require an environment wrapper you keep forgetting and it breaks rendering. "
+    "Instead write EACH step as its own separate $$...$$ block on its own line, e.g. "
+    "$$a = \\frac{F}{m}$$ then on the next line $$a = \\frac{15}{3}$$ then $$a = 5$$."
 )
 
 _LATEX_BLOCK_RE = re.compile(r"\\\[(.*?)\\\]", re.DOTALL)
 _LATEX_INLINE_RE = re.compile(r"\\\((.*?)\\\)", re.DOTALL)
+_BEGIN_ALIGNED_RE = re.compile(r"\\begin\{align(?:ed)?\*?\}")
+_END_ALIGNED_RE = re.compile(r"\\end\{align(?:ed)?\*?\}")
+
+
+def _fix_orphan_aligned_environments(text: str) -> str:
+    """
+    Despite _MATH_FORMAT_RULE telling it not to, the model sometimes writes a
+    multi-line &-aligned derivation closed with \\end{aligned} but forgets the
+    matching \\begin{aligned} that makes the & and \\ line-breaks valid LaTeX.
+    KaTeX then throws a parse error on the bare & / \\end with no environment
+    context, rendering the whole block (and everything up to the next $) as a
+    wall of red error text — even though the $$ delimiters themselves are
+    perfectly balanced, which is why _strip_unbalanced_math doesn't catch it.
+
+    Fix: for each \\end{aligned} with no matching \\begin{aligned} before it,
+    insert \\begin{aligned} right after the nearest preceding $ / $$ that
+    opened the block it's actually inside.
+    """
+    ends = [m.start() for m in _END_ALIGNED_RE.finditer(text)]
+    if not ends:
+        return text
+    begins = [m.start() for m in _BEGIN_ALIGNED_RE.finditer(text)]
+
+    dollar_positions = [(m.start(), m.end()) for m in _DOLLAR_TOKEN_RE.finditer(text)]
+
+    insert_positions = set()
+    begin_idx = 0
+    for end_pos in ends:
+        if begin_idx < len(begins) and begins[begin_idx] < end_pos:
+            begin_idx += 1
+            continue  # this \end{aligned} has an unconsumed \begin{aligned} before it
+        preceding_dollars = [(s, e) for s, e in dollar_positions if s < end_pos]
+        if preceding_dollars:
+            insert_positions.add(preceding_dollars[-1][1])  # just after that delimiter
+
+    for pos in sorted(insert_positions, reverse=True):
+        text = text[:pos] + "\\begin{aligned}" + text[pos:]
+    return text
 
 
 def _normalize_latex_delimiters(text: str) -> str:
@@ -195,6 +237,9 @@ def _normalize_latex_delimiters(text: str) -> str:
     """
     if not text:
         return text
+
+    if "\\end{align" in text:
+        text = _fix_orphan_aligned_environments(text)
 
     if "\\[" in text or "\\(" in text:
         text = _LATEX_BLOCK_RE.sub(lambda m: f"$${m.group(1).strip()}$$", text)
