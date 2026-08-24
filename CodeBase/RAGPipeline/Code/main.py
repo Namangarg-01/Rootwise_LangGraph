@@ -25,6 +25,15 @@ Guardrails:
 """
 
 import os
+
+# Force transformers/sentence-transformers to skip their TensorFlow backend —
+# this project only uses PyTorch embeddings. Must run before retriever.py (or
+# any other module) imports langchain_huggingface, otherwise environments
+# with TensorFlow + Keras 3 installed (e.g. a shared anaconda base env) fail
+# on import with a Keras-3-incompatibility ValueError, even though TF is
+# never actually used here.
+os.environ.setdefault("USE_TF", "0")
+
 import re
 import logging
 from typing import TypedDict, Literal, Optional

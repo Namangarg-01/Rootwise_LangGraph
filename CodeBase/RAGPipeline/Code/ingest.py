@@ -27,6 +27,15 @@ Metadata schema (per your spec):
   }
 """
 
+import os
+
+# Force transformers/sentence-transformers to skip their TensorFlow backend —
+# this project only uses PyTorch embeddings. Without this, environments that
+# happen to have TensorFlow + Keras 3 installed (e.g. a shared anaconda base
+# env) fail on import with a Keras-3-incompatibility ValueError, even though
+# TF is never actually used here.
+os.environ.setdefault("USE_TF", "0")
+
 import re
 import uuid
 import json
@@ -40,8 +49,6 @@ from langchain_huggingface import HuggingFaceEmbeddings  # swap for voyage/anthr
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
-
-import os
 BASE = os.path.dirname(os.path.abspath(__file__))
 
 model_name = "sentence-transformers/all-mpnet-base-v2"
